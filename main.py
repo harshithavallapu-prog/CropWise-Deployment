@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -80,6 +81,7 @@ def load_artifacts():
                 modes = train[col].mode(dropna=True)
                 feature_defaults[col] = modes.iloc[0] if len(modes) else "Unknown"
     training_df = raw
+
 
 def preprocess_one(payload: Dict[str, Any]) -> pd.DataFrame:
     # Only use the exact predictor columns retained by the notebook after DROP_COLUMNS.
@@ -303,3 +305,50 @@ def forecast(farm_id: str, plot_id: str):
     return {"farm_id": farm_id, "plot_id": plot_id,
             "values": {k: (None if pd.isna(row.get(k)) else row.get(k)) for k in keys},
             "note": "Values are taken from the supplied dataset. The current Random Forest classifier does not predict these forecast values."}
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+
+    schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+
+    props = {}
+
+    for col in raw_feature_columns:
+        default = feature_defaults.get(col)
+
+        if pd.api.types.is_numeric_dtype(training_df[col]):
+            typ = "number"
+        else:
+            typ = "string"
+
+        if isinstance(default, (np.integer, np.floating)):
+            default = default.item()
+
+        if isinstance(default, (str, int, float, bool)) and not (
+            isinstance(default, float) and not np.isfinite(default)
+        ):
+            props[col] = {"type": typ, "default": default}
+        else:
+            props[col] = {"type": typ}
+
+    schema.setdefault("components", {}).setdefault("schemas", {})["PredictionInput"] = {
+        "title": "PredictionInput",
+        "type": "object",
+        "properties": props,
+    }
+
+    schema["paths"]["/api/predict"]["post"]["requestBody"]["content"]["application/json"]["schema"] = {
+        "$ref": "#/components/schemas/PredictionInput"
+    }
+
+    app.openapi_schema = schema
+    return schema
+
+
+app.openapi = custom_openapi
+
